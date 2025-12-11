@@ -1,6 +1,7 @@
 from datasets import load_dataset
 import pandas as pd
 from treenode import *
+from load_classifier import *
 
 # ds = load_dataset("musique", "musique_open")  # includes passages!
 # example = ds["train"][0]
@@ -26,6 +27,7 @@ def main():
     llm = LLM()
     stmodel = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     retriever = Retriever(stmodel)
+    classifier =Classifier("musique-hop-classifier")
 
     df = pd.DataFrame(columns=["question", "expected_answer", "answer"])
     idx = 0
@@ -34,9 +36,11 @@ def main():
         question = q["question"]
         expected_answer = q["answer"]  
         flat_sentences = retriever.flatten_context_sentences(q)
-        hops = llm.classify_query(q["question"])
+        pred_class, pred_prob = classifier.predict(question)
+        hops = pred_class + 2
         if hops <= 2:
             # run simple strategy
+            pass
         else:
             constructor = TreeConstructor(llm)
             tree_root = constructor.build_tree(q)
