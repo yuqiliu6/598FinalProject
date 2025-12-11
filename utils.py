@@ -322,6 +322,9 @@ def normalize_outer_template(raw: str) -> str:
         first = field_names[0]
         # replace {first} with {inner}
         raw = raw.replace("{" + first + "}", PLACEHOLDER_CANONICAL)
+    
+    if "{}" in raw:
+        raw = raw.replace("{}", PLACEHOLDER_CANONICAL)
 
     # 4) If we still don't have any placeholder, fall back to just appending one
     if "{inner}" not in raw:

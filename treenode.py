@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any, Protocol, Iterable
 from utils import LLM, Retriever, normalize_outer_template
 from sentence_transformers import SentenceTransformer, util
 import random
+from verifier import run_full_verifier_pipeline
 
 class NodeKind(str, Enum):
     ROOT = "ROOT"
@@ -21,7 +22,7 @@ class ReasoningNode:
     children: List["ReasoningNode"] = field(default_factory=list)
     answer: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
-    confidence: Optional[float] = None
+    accuracy: Optional[float] = None
     answered_count: int = 0
 
     def add_child(self, child: "ReasoningNode") -> None:
@@ -94,13 +95,12 @@ class TreeExecutor:
         self,
         retriever: Retriever,
         llm: LLM,
-        threshold1: float = 0.8,   # "panic" threshold at current aggregation
-        threshold2: float = 0.9    # "suspect" threshold for earlier nodes
+        threshold: float = 0.8,   # "panic" threshold at current aggregation
     ):
         self.retriever = retriever
         self.llm = llm
-        self.threshold1 = threshold1
-        self.threshold2 = threshold2
+        self.threshold = threshold
+
         self._all_nodes: List[ReasoningNode] = []
         self._root: Optional[ReasoningNode] = None
 
@@ -119,7 +119,8 @@ class TreeExecutor:
             retrieved = self.retriever.rank_sentences(node.question, sentences)
             node.answer = self.llm.answer_subquestions(node.question, retrieved)["answer"]
             # you can also verify leaves if you want
-            node.confidence = random.random()
+            verify_result = run_full_verifier_pipeline(node.question, node.answer, retrieved)
+            node.accuracy = verify_result['accuracy']
             node.answered_count += 1
             return
 
@@ -129,24 +130,29 @@ class TreeExecutor:
 
         # Then aggregate according to node kind
         if node.kind == NodeKind.BRANCH:
-            node.answer = self._branch_aggregate(node, sentences)
+            branch_answer = self._branch_aggregate(node)
+            verify_result = run_full_verifier_pipeline(node.question, branch_answer["answer"], branch_answer["child_info"])
+            node.answer = branch_answer["answer"]
+            node.accuracy = verify_result['accuracy']
         elif node.kind == NodeKind.NEST:
-            node.answer = self._nest_aggregate(node, sentences)
+            nest_answer = self._nest_aggregate(node, sentences)
+            verify_result = run_full_verifier_pipeline(node.question, node.answer, nest_answer["retrieved"])
+            node.answer = nest_answer["answer"]
+            node.accuracy = verify_result['accuracy']
+            
         elif node.kind == NodeKind.ROOT:
             if len(node.children) == 1:
                 node.answer = node.children[0].answer
+                node.accuracy = node.children[0].accuracy
             else:
-                node.answer = self._branch_aggregate(node, sentences)
-
-        # Verify this aggregated answer
-        node.confidence = random.random()
-        node.answered_count += 1
-        print("question: \n", node.question)
-        print("confidence: \n", node.confidence)
+                branch_answer = self._branch_aggregate(node)
+                verify_result = run_full_verifier_pipeline(node.question, branch_answer["answer"], branch_answer["child_info"])
+                node.answer = branch_answer["answer"]
+                node.accuracy = verify_result['accuracy']
         
 
         # If very low confidence, trigger repair / re-answer logic
-        if node.confidence is not None and node.confidence < self.threshold1 and node.answered_count < 3:
+        if verify_result['confidence_score'] != 1 and node.answered_count < 3:
             self._fix_answer(node, sentences)
 
 
@@ -178,7 +184,11 @@ class TreeExecutor:
         )
 
         agg_answer = self.llm.chat(prompt)
-        return agg_answer.strip()
+        node.answered_count += 1
+        return {
+            "answer": agg_answer.strip(),
+            "child_info": child_info
+        }
 
     # ---- NEST_AGGREGATION ----
     def _nest_aggregate(self, node: ReasoningNode, sentences:List[str]) -> str:
@@ -204,18 +214,22 @@ class TreeExecutor:
         retrieved = self.retriever.rank_sentences(outer_q, sentences)
         final_answer = self.llm.answer_subquestions(outer_q, retrieved)
         print(final_answer)
-        return final_answer['answer']
+        node.answered_count += 1
+        return {
+            "answer": final_answer["answer"],
+            "retrieved": retrieved
+        }
     
     def _fix_answer(self, trigger_node: ReasoningNode, sentences: List[str]) -> None:
         """
         Called when 'trigger_node' has confidence < threshold1.
-        We look for a previously visited node with confidence < threshold2,
+        We look for a previously visited node with confidence < threshold,
         re-answer that node, and then re-aggregate up to the root.
         """
         # 1. Find candidate nodes with low confidence
         candidates = [
             n for n in self._all_nodes
-            if n.confidence is not None and n.confidence < self.threshold2
+            if n.accuracy is not None and n.accuracy < self.threshold
         ]
 
         if not candidates:
@@ -223,7 +237,7 @@ class TreeExecutor:
             return
 
         # 2. Choose the "worst" node (lowest confidence)
-        target = min(candidates, key=lambda n: n.confidence)
+        target = min(candidates, key=lambda n: n.accuracy)
 
         # 3. Re-answer that node
         self._reanswer_node(target, sentences)
@@ -240,7 +254,8 @@ class TreeExecutor:
         if node.kind == NodeKind.LEAF:
             retrieved = self.retriever.rank_sentences(node.question, sentences)
             node.answer = self.llm.answer_subquestions(node.question, retrieved)["answer"]
-            node.confidence = random.random()
+            verify_result = run_full_verifier_pipeline(node.question, node.answer, retrieved)
+            node.accuracy = verify_result['accuracy']
             node.answered_count += 1
             return
 
@@ -249,17 +264,25 @@ class TreeExecutor:
             self._reanswer_node(child, sentences)
 
         if node.kind == NodeKind.BRANCH:
-            node.answer = self._branch_aggregate(node, sentences)
+            branch_answer = self._branch_aggregate(node)
+            verify_result = run_full_verifier_pipeline(node.question, branch_answer["answer"], branch_answer["child_info"])
+            node.answer = branch_answer["answer"]
+            node.accuracy = verify_result['accuracy']
         elif node.kind == NodeKind.NEST:
-            node.answer = self._nest_aggregate(node, sentences)
+            nest_answer = self._nest_aggregate(node, sentences)
+            verify_result = run_full_verifier_pipeline(node.question, node.answer, nest_answer["retrieved"])
+            node.answer = nest_answer["answer"]
+            node.accuracy = verify_result['accuracy']
+            
         elif node.kind == NodeKind.ROOT:
             if len(node.children) == 1:
                 node.answer = node.children[0].answer
+                node.accuracy = node.children[0].accuracy
             else:
-                node.answer = self._branch_aggregate(node, sentences)
-
-        node.confidence = random.random()
-        node.answered_count += 1
+                branch_answer = self._branch_aggregate(node)
+                verify_result = run_full_verifier_pipeline(node.question, branch_answer["answer"], branch_answer["child_info"])
+                node.answer = branch_answer["answer"]
+                node.accuracy = verify_result['accuracy']
 
     def _propagate_up(self, node: ReasoningNode, sentences: List[str]) -> None:
         """
@@ -270,16 +293,23 @@ class TreeExecutor:
         cur = node.parent
         while cur is not None:
             if cur.kind == NodeKind.BRANCH:
-                cur.answer = self._branch_aggregate(cur, sentences)
+                branch_answer = self._branch_aggregate(cur)
+                verify_result = run_full_verifier_pipeline(cur.question, branch_answer["answer"], branch_answer["child_info"])
+                cur.answer = branch_answer["answer"]
+                cur.accuracy = verify_result['accuracy']
             elif cur.kind == NodeKind.NEST:
-                cur.answer = self._nest_aggregate(cur, sentences)
+                nest_answer = self._nest_aggregate(cur, sentences)
+                verify_result = run_full_verifier_pipeline(cur.question, nest_answer["answer"], nest_answer["retrieved"])
+                cur.answer = nest_answer["answer"]
+                cur.accuracy = verify_result['accuracy']
             elif cur.kind == NodeKind.ROOT:
                 if len(cur.children) == 1:
                     cur.answer = cur.children[0].answer
                 else:
-                    cur.answer = self._branch_aggregate(cur, sentences)
-
-            cur.confidence = random.random()
+                    branch_answer = self._branch_aggregate(cur)
+                    verify_result = run_full_verifier_pipeline(cur.question, branch_answer["answer"], branch_answer["child_info"])
+                    cur.answer = branch_answer["answer"]
+                    cur.accuracy = verify_result['accuracy']
             cur = cur.parent
 def main():
     q = (

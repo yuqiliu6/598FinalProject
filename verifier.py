@@ -6,6 +6,10 @@ from typing import List, Dict, Any
 from datasets import load_dataset
 import google.generativeai as genai
 
+from dotenv import load_dotenv
+load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
+print(api_key)
 
 class Evaluator:
 	def __init__(self, client):
@@ -179,8 +183,8 @@ class Verifier:
 
 class GeminiChatAdapter:
 	def __init__(self, model_name: str = "gemini-2.5-pro"):
-		genai.configure(api_key="AIzaSyDu0I916eEzyNF6dbvNgBXHhcG2rzYao-E")
-		self._model = genai.GenerativeModel("gemini-2.5-pro")
+		genai.configure(api_key=api_key)
+		self._model = genai.GenerativeModel('gemini-2.5-flash')
 		self.chat = self._Chat(self)
 
 	class _Chat:
@@ -239,69 +243,101 @@ class GeminiChatAdapter:
 
 			return _Response([_Choice(_Message(text))])
 
+def run_full_verifier_pipeline(question: str, answer: str, evidence: str) -> Dict[str, Any]:
+	"""
+	Run the full verifier pipeline on a single example.
 
-def main(max_samples: int = 100):
+	Args:
+		question: The original question string.
+		answer:   The model's answer to be evaluated.
+		evidence: A single evidence passage as a string.
+
+	Returns:
+		Dict with:
+			- "pred_label": AttrScore label ("Attributable", "Contradictory", "Extrapolatory")
+			- "confidence_score": 0 or 1
+			- plus passthrough of accuracy / credibility / final_score if you want to inspect them.
+	"""
 	client = GeminiChatAdapter(model_name="gemini-2.5-pro")
 
 	llm_judge = Evaluator(client)
 	attr_model = AttrScoreModel(client, model_name="gemini-2.5-pro")
 	verifier = Verifier(llm_judge, attr_model, threshold=0.75)
 
-	dataset = load_dataset("osunlp/AttrScore", "attreval_gensearch")
-	data_split = dataset.get("test") or dataset.get("validation") or dataset.get("train")
+	evidences = [evidence] if evidence is not None else []
 
-	print("Example keys:", data_split[0].keys())
+	result = verifier.verify(question, answer, evidences)
 
-	total = len(data_split)
-	correct_attr_label = 0
-	correct_confidence = 0
-	false_positives = 0
-	false_negatives = 0
-	for i in range(total):
-		ex = data_split[i]
+	return {
+		"pred_label": result["attr_label"],
+		"confidence_score": result["confidence_score"],
+		"accuracy": result["accuracy"],
+		"credibility": result["credibility"],
+		"final_score": result["final_score"],
+	}
+ 
+# def main(max_samples: int = 100):
+# 	client = GeminiChatAdapter(model_name="gemini-2.5-pro")
 
-		question = ex.get("query", "")
-		answer = ex.get("answer", "")
-		reference = ex.get("reference", "")
-		evidences = [reference] if reference is not None else []
-		gold_label = ex.get("label")
+# 	llm_judge = Evaluator(client)
+# 	attr_model = AttrScoreModel(client, model_name="gemini-2.5-pro")
+# 	verifier = Verifier(llm_judge, attr_model, threshold=0.75)
 
-		result = verifier.verify(question, answer, evidences)
-		pred_label = result["attr_label"]
-		pred_conf = result["confidence_score"]
+# 	dataset = load_dataset("osunlp/AttrScore", "attreval_gensearch")
+# 	data_split = dataset.get("test") or dataset.get("validation") or dataset.get("train")
 
-		if str(pred_label).lower() == str(gold_label).lower():
-			correct_attr_label += 1
-		elif str(pred_label) == "attributable" and str(pred_label).lower() != "attributable":
-			false_positives += 1
-		elif str(pred_label) != "attributable" and str(pred_label).lower() == "attributable":
-			false_negatives +=1
-		gold_conf = 1 if str(gold_label).lower() == "attributable" else 0
+# 	print("Example keys:", data_split[0].keys())
 
-		print("gold-label", gold_label)
-		print("pred-label", pred_label)
-		print("pred-conf-score", pred_conf)
-		print('---------------------------------')
+# 	total = len(data_split)
+# 	correct_attr_label = 0
+# 	correct_confidence = 0
+# 	false_positives = 0
+# 	false_negatives = 0
+# 	for i in range(total):
+# 		ex = data_split[i]
 
-		if pred_conf == gold_conf:
-			correct_confidence += 1
+# 		question = ex.get("query", "")
+# 		answer = ex.get("answer", "")
+# 		reference = ex.get("reference", "")
+# 		evidences = [reference] if reference is not None else []
+# 		gold_label = ex.get("label")
 
-		if (i + 1) % 10 == 0:
-			print(f"Processed {i+1}/{total} examples...")
-			print(f"Attr label accuracy:      {correct_attr_label / total:.3f}")
-			print(f"ConfidenceScore accuracy: {correct_confidence / total:.3f}")
-			print(f"False negative rate: {false_negatives / total:.3f}")
-			print(f"False positive rate: {false_positives / total:.3f}")
+# 		result = verifier.verify(question, answer, evidences)
+# 		pred_label = result["attr_label"]
+# 		pred_conf = result["confidence_score"]
 
-	attr_accuracy = correct_attr_label / total
-	conf_accuracy = correct_confidence / total
+# 		if str(pred_label).lower() == str(gold_label).lower():
+# 			correct_attr_label += 1
+# 		elif str(pred_label) == "attributable" and str(pred_label).lower() != "attributable":
+# 			false_positives += 1
+# 		elif str(pred_label) != "attributable" and str(pred_label).lower() == "attributable":
+# 			false_negatives +=1
+# 		gold_conf = 1 if str(gold_label).lower() == "attributable" else 0
 
-	print("\n=== Evaluation on AttrEval-Simulation (Gemini 2.5 Pro) ===")
-	print(f"Attr label accuracy:      {attr_accuracy:.3f}")
-	print(f"ConfidenceScore accuracy: {conf_accuracy:.3f}")
-	print(f"False negative rate: {false_negatives / total:.3f}")
-	print(f"False positive rate: {false_positives / total:.3f}")
+# 		print("gold-label", gold_label)
+# 		print("pred-label", pred_label)
+# 		print("pred-conf-score", pred_conf)
+# 		print('---------------------------------')
+
+# 		if pred_conf == gold_conf:
+# 			correct_confidence += 1
+
+# 		if (i + 1) % 10 == 0:
+# 			print(f"Processed {i+1}/{total} examples...")
+# 			print(f"Attr label accuracy:      {correct_attr_label / total:.3f}")
+# 			print(f"ConfidenceScore accuracy: {correct_confidence / total:.3f}")
+# 			print(f"False negative rate: {false_negatives / total:.3f}")
+# 			print(f"False positive rate: {false_positives / total:.3f}")
+
+# 	attr_accuracy = correct_attr_label / total
+# 	conf_accuracy = correct_confidence / total
+
+# 	print("\n=== Evaluation on AttrEval-Simulation (Gemini 2.5 Pro) ===")
+# 	print(f"Attr label accuracy:      {attr_accuracy:.3f}")
+# 	print(f"ConfidenceScore accuracy: {conf_accuracy:.3f}")
+# 	print(f"False negative rate: {false_negatives / total:.3f}")
+# 	print(f"False positive rate: {false_positives / total:.3f}")
 
 
-if __name__ == "__main__":
-	main(max_samples=100)
+# if __name__ == "__main__":
+# 	main(max_samples=100)
