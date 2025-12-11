@@ -1,3 +1,5 @@
 .env
 *.txt
 *.csv
+*.jsonl
+musique-hop-classifier/
