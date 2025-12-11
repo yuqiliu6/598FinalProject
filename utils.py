@@ -10,29 +10,6 @@ load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 print(api_key)
 
-DECOMPOSITION_SYSTEM_PROMPT = """\
-You are a question decomposition module for a multi-hop QA system.
-
-You receive a question (a node in a reasoning tree) and must decide:
-- Either: it's already a single-hop question (a leaf), so mark it as leaf.
-- Or: decompose it into exactly TWO simpler, dependent sub-questions that,
-  together, are sufficient to answer the original question.
-
-Rules:
-- Prefer minimal, factual sub-questions.
-- Sub-questions should be answerable by retrieval + LLM.
-- Respect dependencies: a child can mention "the person found in subquestion 1" etc.
-- If it is already single-hop, do NOT force a decomposition.
-
-Return STRICTLY valid JSON with this schema:
-{
-  "is_leaf": bool,          // true if no further decomposition
-  "node_type": "branch" | "nest",
-  "subquestions": [string, string] | []
-}
-- "branch": two parallel sub-questions whose answers are combined at this node.
-- "nest": subquestion 2 depends on the answer to subquestion 1.
-"""
 
 class LLM:
     # Configure Gemini API
@@ -126,16 +103,73 @@ class LLM:
            "outer_template": "Who owns {inner}?"}
         """
         system_prompt = (
-            "You are a question planner for multi-hop QA. "
-            "Given a question, decide if it's:\n"
-            "1) directly answerable (leaf),\n"
-            "2) BRANCH: decomposable into independent sub-questions, or\n"
-            "3) NEST: requires first answering a sub-question and then "
-            "using its answer in an outer question.\n\n"
-            "Return STRICT JSON with keys: 'type' ∈ "
-            "['leaf','branch','nest'], and optionally 'sub_questions', "
-            "'inner_question', 'outer_template'."
-        )
+    "You are a Question Planning module for multi-hop QA. "
+    "Given a user question, your task is ONLY to determine the correct "
+    "reasoning structure needed to answer it. You do NOT answer the question. "
+    "You classify the question into exactly ONE of the following types:\n\n"
+
+    "1. 'leaf' — The question is directly answerable with a single retrieval "
+    "or single-hop reasoning. No decomposition is necessary.\n\n"
+
+    "2. 'branch' — The question must be decomposed into multiple independent "
+    "sub-questions. Each sub-question can be solved separately. The final "
+    "answer is obtained by aggregating these independently-computed answers. "
+    "No sub-question depends on another.\n\n"
+
+    "3. 'nest' — The question contains a dependency. You must answer an "
+    "inner sub-question first, and use its answer to complete an outer "
+    "question. The outer question cannot be resolved without the inner answer.\n\n"
+
+    "OUTPUT FORMAT (STRICT):\n"
+    "You MUST return a JSON object with:\n"
+    "- 'type': one of ['leaf','branch','nest']\n"
+    "- If type='branch': include 'sub_questions' (a list of strings)\n"
+    "- If type='nest': include:\n"
+    "      'inner_question': a single string\n"
+    "      'outer_template': a string containing a placeholder '{x}' where "
+    "the inner answer will be inserted\n"
+    "Do NOT include any text outside the JSON object.\n"
+    "Do NOT answer any sub-question.\n\n"
+
+    "CLARITY RULES:\n"
+    "- For 'branch', ensure each sub-question is independent.\n"
+    "- For 'nest', ensure the inner question fills in a missing entity "
+    "required by the outer question.\n"
+    "- Sub-questions must be logically entailed by the original question.\n"
+    "- Keep the decomposition minimal and meaningful.\n\n"
+
+    "EXAMPLES:\n\n"
+
+    "Example 1 (leaf):\n"
+    "Input: 'Who wrote Pride and Prejudice?'\n"
+    "Output:\n"
+    "{\n"
+    "  \"type\": \"leaf\"\n"
+    "}\n\n"
+
+    "Example 2 (branch):\n"
+    "Input: 'Which city is the capital of France, and what river runs through it?'\n"
+    "Output:\n"
+    "{\n"
+    "  \"type\": \"branch\",\n"
+    "  \"sub_questions\": [\n"
+    "    \"What is the capital of France?\",\n"
+    "    \"What river runs through the capital of France?\"\n"
+    "  ]\n"
+    "}\n\n"
+
+    "Example 3 (nest):\n"
+    "Input: 'What is the population of the city where Albert Einstein was born?'\n"
+    "Output:\n"
+    "{\n"
+    "  \"type\": \"nest\",\n"
+    "  \"inner_question\": \"Where was Albert Einstein born?\",\n"
+    "  \"outer_template\": \"What is the population of {x}?\"\n"
+    "}\n\n"
+
+    "Now analyze the user's question and return ONLY the JSON object."
+)
+
         user_prompt = f"\nQuestion:\n{question}\n\nReturn only JSON."
 
         raw = self.chat(system_prompt+user_prompt)
@@ -223,7 +257,7 @@ class Retriever():
                 })
         return flat
 
-    def flatten_context_sentences(self, example):
+    def flatten_context_sentences_musique(self, example):
         """
         Turn example["paragraphs"] into a flat list of sentences with metadata.
         Each returned item: {title, sent_id, text}.
